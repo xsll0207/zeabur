@@ -1,14 +1,63 @@
-name: Zeabur ID 探测器
-on: workflow_dispatch
+name: Zeabur 自动化控制 (v1.6.0)
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '执行动作 (suspend-停止 / resume-启动)'
+        required: true
+        default: 'suspend'
+        type: choice
+        options:
+          - suspend
+          - resume
+
 jobs:
-  list-ids:
+  zeabur-task:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取所有项目和服务 ID
+      - name: 执行控制指令
         run: |
-          QUERY="query { projects { name services { _id name } } }"
-          curl --request POST \
+          ACTION="${{ github.event.inputs.action || 'suspend' }}"
+          S_ID="${{ secrets.SERVICE_ID }}"
+          E_ID="${{ secrets.ENVIRONMENT_ID }}"
+          
+          echo "正在对服务 $S_ID 执行 $ACTION 操作..."
+
+          # 方案 A: 使用 serviceID (官方新版规范)
+          QUERY_A="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
+          
+          # 方案 B: 使用 id (官方旧版/兼容规范)
+          QUERY_B="mutation { ${ACTION}Service(id: \"$S_ID\", environmentID: \"$E_ID\") }"
+
+          # 尝试方案 A
+          echo "尝试方案 A (serviceID)..."
+          RES_A=$(curl -s --request POST \
             --url https://api.zeabur.com/graphql \
             --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
             --header 'Content-Type: application/json' \
-            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')"
+            --data "$(jq -n --arg q "$QUERY_A" '{"query": $q}')")
+          
+          echo "方案 A 响应: $RES_A"
+
+          if [[ $RES_A == *"true"* ]]; then
+            echo "✅ 方案 A 执行成功"
+          else
+            echo "⚠️ 方案 A 失败，尝试方案 B (id)..."
+            RES_B=$(curl -s --request POST \
+              --url https://api.zeabur.com/graphql \
+              --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
+              --header 'Content-Type: application/json' \
+              --data "$(jq -n --arg q "$QUERY_B" '{"query": $q}')")
+            
+            echo "方案 B 响应: $RES_B"
+            
+            if [[ $RES_B == *"true"* ]]; then
+              echo "✅ 方案 B 执行成功"
+            else
+              echo "❌ 所有方案均执行失败，请检查 Secret 中的 ID 是否带了 service- 前缀"
+              exit 1
+            fi
+          fi
