@@ -1,8 +1,8 @@
-name: Zeabur 自动化控制 (v1.6.2)
+name: Zeabur 自动化控制 (v1.6.3)
 
 on:
   schedule:
-    - cron: '*/20 * * * *'  # 每 20 分钟自动关机
+    - cron: '*/20 * * * *'
   workflow_dispatch:
     inputs:
       action:
@@ -17,33 +17,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 执行控制指令
+        # 核心修正：在这里显式注入环境变量
+        env:
+          ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+          SERVICE_ID: ${{ secrets.SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
           ACTION="${{ github.event.inputs.action || 'suspend' }}"
           
-          # 直接读取 Secrets
-          S_ID="${{ secrets.SERVICE_ID }}"
-          E_ID="${{ secrets.ENVIRONMENT_ID }}"
+          # 检查变量是否成功读取
+          if [ -z "$ZEABUR_TOKEN" ] || [ -z "$SERVICE_ID" ] || [ -z "$ENVIRONMENT_ID" ]; then
+            echo "❌ 错误：GitHub Secrets 未配置或读取失败！"
+            echo "请检查仓库 Settings -> Secrets -> Actions 中的变量名。"
+            exit 1
+          fi
 
-          echo "正在对服务 $S_ID (环境 $E_ID) 执行 $ACTION 操作..."
+          echo "正在对服务 $SERVICE_ID 执行 $ACTION 操作..."
 
-          # 使用标准 GraphQL Mutation 格式
-          QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           
           RESPONSE=$(curl -s --request POST \
             --url https://api.zeabur.com/graphql \
-            --header "Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}" \
+            --header "Authorization: Bearer $ZEABUR_TOKEN" \
             --header "Content-Type: application/json" \
             --data "$(jq -n --arg q "$QUERY" '{"query": $q}')")
           
           echo "API 响应内容: $RESPONSE"
 
-          # 判定逻辑
           if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
-            echo "✅ 指令执行成功！服务已尝试 $ACTION"
-          elif [[ $RESPONSE == *"Permission denied"* ]]; then
-            echo "❌ 权限拒绝：请确认您的 Token 是否包含该项目权限"
-            exit 1
+            echo "✅ 指令执行成功！"
           else
-            echo "❌ 执行异常，请检查响应内容"
+            echo "❌ 执行失败，请检查响应内容"
             exit 1
           fi
