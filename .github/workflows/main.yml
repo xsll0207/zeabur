@@ -1,12 +1,12 @@
-name: Zeabur 自动化控制 (v1.4.1)
+name: Zeabur 自动化控制 (v1.4.3)
 
 on:
   schedule:
-    - cron: '*/20 * * * *'
+    - cron: '*/20 * * * *'  # 每20分钟运行一次
   workflow_dispatch:
     inputs:
       action:
-        description: '执行动作'
+        description: '选择动作 (suspend-停止 / resume-启动)'
         required: true
         default: 'suspend'
         type: choice
@@ -18,30 +18,36 @@ jobs:
   zeabur-task:
     runs-on: ubuntu-latest
     steps:
-      - name: 执行 Zeabur 指令
+      - name: 发送请求至 Zeabur API
         run: |
+          # 确定当前动作
           ACTION="${{ github.event.inputs.action }}"
           if [ -z "$ACTION" ]; then
             ACTION="suspend"
           fi
           
-          echo "正在执行 $ACTION 操作..."
+          echo "正在对服务执行 $ACTION 操作..."
           
-          # 使用官方要求的 serviceID 和 environmentID 参数
-          # 注意：这里的转义字符非常重要
+          # 构建 GraphQL 查询
+          # 严格按照官方要求的 serviceID 和 environmentID 传参
           QUERY="mutation { ${ACTION}Service(serviceID: \"${{ secrets.SERVICE_ID }}\", environmentID: \"${{ secrets.ENVIRONMENT_ID }}\") }"
           
+          # 使用 API 节点 api.zeabur.com
           RESPONSE=$(curl --request POST \
             --url https://api.zeabur.com/graphql \
             --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
             --header 'Content-Type: application/json' \
-            --data "{\"query\":\"$QUERY\"}")
+            --data "$(JSON_STRING=$(jq -n --arg q "$QUERY" '{"query": $q}') && echo $JSON_STRING)")
           
           echo "API 响应内容: $RESPONSE"
           
-          if [[ $RESPONSE == *"errors"* ]]; then
-            echo "❌ 执行失败：请检查 Service ID 和 Environment ID 是否匹配"
+          # 结果判定
+          if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
+            echo "✅ 指令执行成功"
+          elif [[ $RESPONSE == *"errors"* ]]; then
+            echo "❌ API 返回错误"
             exit 1
           else
-            echo "✅ 执行成功"
+            echo "⚠️ 响应异常，请检查 ID 是否正确"
+            exit 1
           fi
