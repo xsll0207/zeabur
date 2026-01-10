@@ -1,4 +1,4 @@
-name: Zeabur 自动化控制 (v1.6.3)
+name: Zeabur 自动化控制 (v1.6.4)
 
 on:
   schedule:
@@ -17,24 +17,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 执行控制指令
-        # 核心修正：在这里显式注入环境变量
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
-          SERVICE_ID: ${{ secrets.SERVICE_ID }}
-          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
+          RAW_SID: ${{ secrets.SERVICE_ID }}
+          RAW_EID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
           ACTION="${{ github.event.inputs.action || 'suspend' }}"
           
-          # 检查变量是否成功读取
-          if [ -z "$ZEABUR_TOKEN" ] || [ -z "$SERVICE_ID" ] || [ -z "$ENVIRONMENT_ID" ]; then
-            echo "❌ 错误：GitHub Secrets 未配置或读取失败！"
-            echo "请检查仓库 Settings -> Secrets -> Actions 中的变量名。"
-            exit 1
-          fi
+          # 核心修正：自动补全 Zeabur 必须的前缀
+          # 如果 Secrets 里没写前缀，脚本自动加上
+          [[ $RAW_SID == service-* ]] && S_ID="$RAW_SID" || S_ID="service-$RAW_SID"
+          [[ $RAW_EID == env-* ]] && E_ID="$RAW_EID" || E_ID="env-$RAW_EID"
 
-          echo "正在对服务 $SERVICE_ID 执行 $ACTION 操作..."
+          echo "正在对服务 $S_ID 执行 $ACTION 操作 (环境: $E_ID)..."
 
-          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
           
           RESPONSE=$(curl -s --request POST \
             --url https://api.zeabur.com/graphql \
@@ -46,7 +43,10 @@ jobs:
 
           if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
             echo "✅ 指令执行成功！"
+          elif [[ $RESPONSE == *"No such resource"* ]]; then
+            echo "❌ 依然提示资源不存在。请检查：你的项目是否被删除，或 Token 权限是否跨了 Workspace。"
+            exit 1
           else
-            echo "❌ 执行失败，请检查响应内容"
+            echo "❌ 执行结果内容异常。"
             exit 1
           fi
