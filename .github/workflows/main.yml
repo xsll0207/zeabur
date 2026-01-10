@@ -1,0 +1,48 @@
+name: Zeabur 自动化控制 (v1.4.0)
+
+on:
+  # 1. 定时触发：每 20 分钟执行一次
+  schedule:
+    - cron: '*/20 * * * *'
+  
+  # 2. 手动触发：让你能随时点击按钮开关
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '选择执行动作'
+        required: true
+        default: 'suspend'
+        type: choice
+        options:
+          - suspend
+          - resume
+
+jobs:
+  zeabur-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 执行 Zeabur 指令
+        run: |
+          # 确定动作：如果是手动触发则用选择的动作，如果是定时触发则默认执行 suspend
+          ACTION="${{ github.event.inputs.action }}"
+          if [ -z "$ACTION" ]; then
+            ACTION="suspend"
+          fi
+          
+          echo "正在对服务 ${{ secrets.SERVICE_ID }} 执行 $ACTION 操作..."
+          
+          RESPONSE=$(curl --request POST \
+            --url https://api.zeabur.com/graphql \
+            --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
+            --header 'Content-Type: application/json' \
+            --data "{\"query\":\"mutation { ${ACTION}Service(_id: \\\"${{ secrets.SERVICE_ID }}\\\") }\"}")
+          
+          echo "API 响应结果: $RESPONSE"
+          
+          # 检查是否报错
+          if [[ $RESPONSE == *"errors"* ]]; then
+            echo "❌ 执行失败"
+            exit 1
+          else
+            echo "✅ 执行成功"
+          fi
