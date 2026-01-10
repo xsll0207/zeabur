@@ -1,18 +1,16 @@
-name: Zeabur 自动化控制 (v1.6.0)
+name: Zeabur 自动化控制 (v1.6.2)
 
 on:
   schedule:
-    - cron: '*/20 * * * *'
+    - cron: '*/20 * * * *'  # 每 20 分钟自动关机
   workflow_dispatch:
     inputs:
       action:
-        description: '执行动作 (suspend-停止 / resume-启动)'
+        description: '执行动作'
         required: true
         default: 'suspend'
         type: choice
-        options:
-          - suspend
-          - resume
+        options: [suspend, resume]
 
 jobs:
   zeabur-task:
@@ -21,43 +19,31 @@ jobs:
       - name: 执行控制指令
         run: |
           ACTION="${{ github.event.inputs.action || 'suspend' }}"
+          
+          # 直接读取 Secrets
           S_ID="${{ secrets.SERVICE_ID }}"
           E_ID="${{ secrets.ENVIRONMENT_ID }}"
-          
-          echo "正在对服务 $S_ID 执行 $ACTION 操作..."
 
-          # 方案 A: 使用 serviceID (官方新版规范)
-          QUERY_A="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
-          
-          # 方案 B: 使用 id (官方旧版/兼容规范)
-          QUERY_B="mutation { ${ACTION}Service(id: \"$S_ID\", environmentID: \"$E_ID\") }"
+          echo "正在对服务 $S_ID (环境 $E_ID) 执行 $ACTION 操作..."
 
-          # 尝试方案 A
-          echo "尝试方案 A (serviceID)..."
-          RES_A=$(curl -s --request POST \
+          # 使用标准 GraphQL Mutation 格式
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
+          
+          RESPONSE=$(curl -s --request POST \
             --url https://api.zeabur.com/graphql \
-            --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
-            --header 'Content-Type: application/json' \
-            --data "$(jq -n --arg q "$QUERY_A" '{"query": $q}')")
+            --header "Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')")
           
-          echo "方案 A 响应: $RES_A"
+          echo "API 响应内容: $RESPONSE"
 
-          if [[ $RES_A == *"true"* ]]; then
-            echo "✅ 方案 A 执行成功"
+          # 判定逻辑
+          if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
+            echo "✅ 指令执行成功！服务已尝试 $ACTION"
+          elif [[ $RESPONSE == *"Permission denied"* ]]; then
+            echo "❌ 权限拒绝：请确认您的 Token 是否包含该项目权限"
+            exit 1
           else
-            echo "⚠️ 方案 A 失败，尝试方案 B (id)..."
-            RES_B=$(curl -s --request POST \
-              --url https://api.zeabur.com/graphql \
-              --header 'Authorization: Bearer ${{ secrets.ZEABUR_TOKEN }}' \
-              --header 'Content-Type: application/json' \
-              --data "$(jq -n --arg q "$QUERY_B" '{"query": $q}')")
-            
-            echo "方案 B 响应: $RES_B"
-            
-            if [[ $RES_B == *"true"* ]]; then
-              echo "✅ 方案 B 执行成功"
-            else
-              echo "❌ 所有方案均执行失败，请检查 Secret 中的 ID 是否带了 service- 前缀"
-              exit 1
-            fi
+            echo "❌ 执行异常，请检查响应内容"
+            exit 1
           fi
