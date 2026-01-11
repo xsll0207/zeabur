@@ -1,49 +1,54 @@
-name: Zeabur 自动唤醒与排队监测 (v2.5.2)
+name: Zeabur 自动刷新重启 (精简版)
 
 on:
   schedule:
-    - cron: '*/20 * * * *'
-  workflow_dispatch:
+    - cron: '*/20 * * * *'  # 每 20 分钟检测一次
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
-  auto-wake:
+  check-and-restart:
     runs-on: ubuntu-latest
     steps:
-      - name: 唤醒并深度探测
+      - name: 检测网页是否存活
+        id: check_status
+        run: |
+          TARGET="rww.zeabur.app"
+          echo "🔍 正在检测 $TARGET ..."
+          
+          # 获取 HTTP 状态码
+          HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --connect-timeout 15 https://$TARGET)
+          echo "📡 当前 HTTP 状态码: $HTTP_STATUS"
+          
+          # 只要状态码是 200，就标记为需要重启
+          if [ "$HTTP_STATUS" -eq 200 ]; then
+            echo "✅ 网页正常，执行重启。"
+            echo "need_restart=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ 网页不可访问或非200状态，跳过重启。"
+            echo "need_restart=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 执行重启
+        if: steps.check_status.outputs.need_restart == 'true'
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          # 1. 发送重启指令
-          echo "🚀 发送 restartService 指令..."
-          WAKE_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$WAKE_QUERY" '{"query": $q}')"
+          echo "🚀 正在向 Zeabur 发送 restartService 指令..."
           
-          echo "⏳ 等待系统破冰..."
-          sleep 10
-
-          START_TIME=$(date +%s)
-          echo "🔍 正在高频探测容器状态机..."
-
-          for i in {1..60}; do
-            # 修正后的查询：直接查 service 节点下的状态，避免 state 节点返回 null
-            QUERY="query { service(_id: \"$SERVICE_ID\") { status(environmentID: \"$ENVIRONMENT_ID\") } }"
-            RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-            
-            # 提取状态，并设置默认值防止 null
-            STATUS=$(echo $RES | jq -r '.data.service.status // "STARTING"')
-            
-            ELAPSED=$(($(date +%s) - START_TIME))
-            echo "⏱️ [+$ELAPSED s] 容器状态: $STATUS"
-
-            if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已正式运行！"
-              echo "📊 开机排队总耗时: $ELAPSED 秒"
-              exit 0
-            elif [ "$STATUS" == "CRASHED" ]; then
-              echo "❌ 服务启动崩溃，请检查 Zeabur 控制台日志。"
-              exit 1
-            fi
-            sleep 5
-          done
+          QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
+            -H "Authorization: Bearer $ZEABUR_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          
+          echo "API 响应: $RESPONSE"
+          
+          if [[ $RESPONSE == *"restartService\":true"* ]]; then
+            echo "🎉 重启指令已下达成功。"
+          else
+            echo "❌ 重启失败，请检查 Secret 配置。"
+            exit 1
+          fi
