@@ -1,4 +1,4 @@
-name: Zeabur 自动化控制 (v1.6.4)
+name: Zeabur 自动化控制 (v1.6.5)
 
 on:
   schedule:
@@ -24,12 +24,17 @@ jobs:
         run: |
           ACTION="${{ github.event.inputs.action || 'suspend' }}"
           
-          # 核心修正：自动补全 Zeabur 必须的前缀
-          # 如果 Secrets 里没写前缀，脚本自动加上
-          [[ $RAW_SID == service-* ]] && S_ID="$RAW_SID" || S_ID="service-$RAW_SID"
-          [[ $RAW_EID == env-* ]] && E_ID="$RAW_EID" || E_ID="env-$RAW_EID"
+          # 1. 智能清洗：去掉可能误填的 envID= 或 service- 前缀
+          CLEAN_SID=$(echo "$RAW_SID" | sed 's/service-//g')
+          CLEAN_EID=$(echo "$RAW_EID" | sed 's/envID=//g' | sed 's/env-//g')
 
-          echo "正在对服务 $S_ID 执行 $ACTION 操作 (环境: $E_ID)..."
+          # 2. 统一加上官方要求的 service- 和 env- 前缀
+          S_ID="service-$CLEAN_SID"
+          E_ID="env-$CLEAN_EID"
+
+          echo "正在执行操作：$ACTION"
+          echo "目标服务 ID: $S_ID"
+          echo "目标环境 ID: $E_ID"
 
           QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
           
@@ -43,10 +48,7 @@ jobs:
 
           if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
             echo "✅ 指令执行成功！"
-          elif [[ $RESPONSE == *"No such resource"* ]]; then
-            echo "❌ 依然提示资源不存在。请检查：你的项目是否被删除，或 Token 权限是否跨了 Workspace。"
-            exit 1
           else
-            echo "❌ 执行结果内容异常。"
+            echo "❌ 执行失败，请检查上方 API 响应。"
             exit 1
           fi
