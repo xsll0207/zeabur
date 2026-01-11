@@ -1,60 +1,23 @@
-name: Zeabur 自动化控制 (v1.6.6)
-
-on:
-  schedule:
-    - cron: '*/20 * * * *'
-  workflow_dispatch:
-    inputs:
-      action:
-        description: '执行动作'
-        required: true
-        default: 'suspend'
-        type: choice
-        options: [suspend, resume]
-
+name: Zeabur 权限归属探测器 (v1.7.0)
+on: workflow_dispatch
 jobs:
-  zeabur-task:
+  check-permission:
     runs-on: ubuntu-latest
     steps:
-      - name: 执行控制指令
+      - name: 探测 Token 可见性
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
-          RAW_SID: ${{ secrets.SERVICE_ID }}
-          RAW_EID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          ACTION="${{ github.event.inputs.action || 'suspend' }}"
-          
-          # 清理并规范化 ID
-          CLEAN_SID=$(echo "$RAW_SID" | sed 's/service-//g' | xargs)
-          CLEAN_EID=$(echo "$RAW_EID" | sed 's/envID=//g' | sed 's/env-//g' | xargs)
-
-          S_ID="service-$CLEAN_SID"
-          E_ID="env-$CLEAN_EID"
-
-          echo "---- 调试信息 ----"
-          echo "动作: $ACTION"
-          echo "标准化服务ID: $S_ID"
-          echo "标准化环境ID: $E_ID"
-          
-          # 构造 GraphQL
-          QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
-          
-          # 发起请求
-          RESPONSE=$(curl -s --request POST \
-            --url https://api.zeabur.com/graphql \
+          # 1. 查 Token 自己的身份
+          echo "--- 身份检查 ---"
+          curl -s --request POST --url https://api.zeabur.com/graphql \
             --header "Authorization: Bearer $ZEABUR_TOKEN" \
             --header "Content-Type: application/json" \
-            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-          
-          echo "---- API 响应 ----"
-          echo "$RESPONSE"
+            --data '{"query":"query { me { username email } }"}' | jq .
 
-          if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
-            echo "✅ 成功：指令已送达"
-          elif [[ $RESPONSE == *"Permission denied"* ]]; then
-            echo "❌ 权限拒绝：请按照上述步骤重新生成全权限 Token！"
-            exit 1
-          else
-            echo "❌ 失败：请检查响应内容"
-            exit 1
-          fi
+          # 2. 查该 Token 真正有权操作的所有项目和环境 ID
+          echo "--- 权限范围检查 ---"
+          curl -s --request POST --url https://api.zeabur.com/graphql \
+            --header "Authorization: Bearer $ZEABUR_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{"query":"query { projects { items { name _id environments { _id name } services { _id name } } } }"}' | jq .
