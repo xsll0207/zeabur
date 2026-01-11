@@ -1,4 +1,4 @@
-name: Zeabur 连通即重启 (v2.8.1)
+name: Zeabur 延时刷新重启 (v2.9.0)
 
 on:
   schedule:
@@ -15,55 +15,41 @@ jobs:
           TARGET="rww.zeabur.app"
           echo "🔍 正在检测 $TARGET 是否在线..."
           
-          # 获取 HTTP 状态码，超时设为 15 秒
+          # 获取 HTTP 状态码
           HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --connect-timeout 15 https://$TARGET)
           echo "📡 当前 HTTP 状态码: $HTTP_STATUS"
           
           if [ "$HTTP_STATUS" -eq 200 ]; then
-            echo "✅ 网页正常开启，准备执行重启..."
+            echo "✅ 网页正常开启，准备延时重启..."
             echo "need_restart=true" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ 网页当前不可访问或异常，跳过本次重启。"
+            echo "ℹ️ 网页当前无法访问 (状态码: $HTTP_STATUS)，跳过本次重启。"
             echo "need_restart=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: 执行 v2.5.2 深度重启方案
+      - name: 执行延时重启
         if: steps.check_status.outputs.need_restart == 'true'
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          # 1. 发送重启指令
-          echo "🚀 发送 restartService 指令..."
+          echo "⏳ 网页已确认正常，等待 30 秒后执行指令..."
+          sleep 30
+
+          # 发送 v2.5.2 核心重启指令
+          echo "🚀 正在发送 restartService 指令..."
           WAKE_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          WAKE_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
+          
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
             -H "Authorization: Bearer $ZEABUR_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg q "$WAKE_QUERY" '{"query": $q}')")
           
-          echo "API 指令响应: $WAKE_RES"
+          echo "API 指令响应: $RESPONSE"
           
-          # 2. 等待系统破冰
-          echo "⏳ 等待 10 秒让系统处理请求..."
-          sleep 10
-
-          # 3. 高频探测容器状态
-          echo "🔍 正在确认重启状态..."
-          for i in {1..20}; do
-            # 使用 v2.5.2 推荐的 status(environmentID) 路径，避免 null 报错
-            QUERY="query { service(_id: \"$SERVICE_ID\") { status(environmentID: \"$ENVIRONMENT_ID\") } }"
-            RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-            
-            STATUS=$(echo $RES | jq -r '.data.service.status // "STARTING"')
-            echo "⏱️ 容器当前状态: $STATUS"
-
-            if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已成功重启并恢复运行！"
-              exit 0
-            elif [ "$STATUS" == "CRASHED" ]; then
-              echo "❌ 重启后服务崩溃，请检查 Zeabur 日志。"
-              exit 1
-            fi
-            sleep 5
-          done
+          if [[ $RESPONSE == *"restartService\":true"* ]]; then
+            echo "🎉 重启指令已成功下达，流程结束。"
+          else
+            echo "❌ 重启指令可能未生效，请检查响应内容。"
+          fi
