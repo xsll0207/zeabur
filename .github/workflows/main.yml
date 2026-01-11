@@ -1,64 +1,52 @@
-name: Zeabur 连通后开关机循环 (v3.1.0)
+name: Zeabur 状态自动翻转
 
 on:
   schedule:
-    - cron: '*/20 * * * *'  # 每 20 分钟检测一次
+    - cron: '*/9 * * * *'  # 每 9 分钟检测一次
   workflow_dispatch:      # 支持手动触发
 
 jobs:
-  suspend-and-restart:
+  toggle-service:
     runs-on: ubuntu-latest
     steps:
-      - name: 检测网页连通性
+      - name: 检测当前连通性
         id: check_status
         run: |
           TARGET="rww.zeabur.app"
-          echo "🔍 正在检测 $TARGET 是否在线..."
+          echo "🔍 正在探测 $TARGET ..."
           
           # 获取 HTTP 状态码
           HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --connect-timeout 15 https://$TARGET)
           echo "📡 当前 HTTP 状态码: $HTTP_STATUS"
           
           if [ "$HTTP_STATUS" -eq 200 ]; then
-            echo "✅ 网页正常开启，准备执行 [关机 -> 1分钟 -> 重启] 流程..."
-            echo "need_action=true" >> $GITHUB_OUTPUT
+            echo "✅ 服务在线，准备 [关机]。"
+            echo "action=suspend" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ 网页当前不可访问 (状态码: $HTTP_STATUS)，跳过本次流程。"
-            echo "need_action=false" >> $GITHUB_OUTPUT
+            echo "❌ 服务离线，准备 [重启/开机]。"
+            echo "action=restart" >> $GITHUB_OUTPUT
           fi
 
-      - name: 执行开关机操作 (v2.9.0 方案)
-        if: steps.check_status.outputs.need_action == 'true'
+      - name: 执行状态切换
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          # 1. 执行关机指令 (Suspend)
-          echo "Step 1: 🚀 正在发送 suspendService 指令..."
-          SUSPEND_QUERY="mutation { suspendService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          SUSPEND_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
-            -H "Authorization: Bearer $ZEABUR_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$SUSPEND_QUERY" '{"query": $q}')")
-          echo "API 响应: $SUSPEND_RES"
-
-          # 2. 等待 1 分钟
-          echo "Step 2: ⏳ 正在等待 1 分钟 (冷却中)..."
-          sleep 60
-
-          # 3. 执行重启指令 (使用 v2.9.0 的 restartService 方案)
-          echo "Step 3: 🚀 正在发送 restartService 指令..."
-          RESTART_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          RESTART_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
-            -H "Authorization: Bearer $ZEABUR_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$RESTART_QUERY" '{"query": $q}')")
+          ACTION_TYPE="${{ steps.check_status.outputs.action }}"
           
-          echo "API 响应: $RESTART_RES"
-          
-          if [[ $RESTART_RES == *"restartService\":true"* ]]; then
-            echo "🎉 流程成功结束：已完成关机并下达重启指令。"
+          if [ "$ACTION_TYPE" == "suspend" ]; then
+            echo "🚀 发送 suspendService 指令..."
+            QUERY="mutation { suspendService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           else
-            echo "❌ 重启指令下达可能失败，请检查 API 响应内容。"
+            echo "🚀 发送 restartService 指令..."
+            QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           fi
+
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
+            -H "Authorization: Bearer $ZEABUR_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          
+          echo "API 响应: $RESPONSE"
+          echo "🎉 指令已成功下达。"
