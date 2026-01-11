@@ -1,4 +1,4 @@
-name: Zeabur 强力重启 (v1.9.5)
+name: Zeabur 深度唤醒与排队监测 (v2.0.0)
 
 on:
   workflow_dispatch:
@@ -14,59 +14,51 @@ jobs:
   zeabur-task:
     runs-on: ubuntu-latest
     steps:
-      - name: 触发重启指令
+      - name: 获取最新部署 ID 并执行重启
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          ACTION="${{ github.event.inputs.action || 'redeploy' }}"
+          # 1. 获取最后一次部署的 ID
+          LIST_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id } } } } }"
+          LIST_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$LIST_QUERY" '{"query": $q}')")
           
-          # 模拟网页“重启当前版本”按钮
-          # 尝试只传 serviceID，这通常会触发当前环境的重新部署
-          QUERY="mutation { redeployService(serviceID: \"$SERVICE_ID\") }"
+          DEPLOY_ID=$(echo $LIST_RES | jq -r '.data.service.deployments.edges[0].node._id')
           
-          if [ "$ACTION" == "suspend" ]; then
-            QUERY="mutation { suspendService(serviceID: \"$SERVICE_ID\", environmentID: \"${{ secrets.ENVIRONMENT_ID }}\") }"
+          if [ "$DEPLOY_ID" == "null" ] || [ -z "$DEPLOY_ID" ]; then
+            echo "❌ 未找到部署记录，尝试普通重启..."
+            QUERY="mutation { redeployService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          else
+            echo "🎯 找到目标部署 ID: $DEPLOY_ID"
+            # 2. 模仿网页端：针对特定部署 ID 进行重部署
+            QUERY="mutation { redeployService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\", deploymentID: \"$DEPLOY_ID\") }"
           fi
 
-          echo "🚀 正在发送 $ACTION 指令..."
-          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
-            -H "Authorization: Bearer $ZEABUR_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-          
+          echo "🚀 发送指令..."
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
           echo "API 响应: $RESPONSE"
 
-      - name: 实时计算排队与启动时间
+      - name: 监测排队耗时
         if: github.event.inputs.action == 'redeploy'
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
         run: |
-          echo "⏳ 正在监控容器拉起进度..."
+          echo "⏳ 监测容器拉起状态..."
           START_TIME=$(date +%s)
-          
-          # 增加检查频率（每10秒一次）以捕捉排队瞬间
           for i in {1..60}; do
             sleep 10
-            
-            # 查询最新部署状态
-            QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { status } } } } }"
-            RES=$(curl -s -X POST https://api.zeabur.com/graphql \
-              -H "Authorization: Bearer $ZEABUR_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+            # 这里查询的是 service 的实时运行状态
+            STATUS_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { status } } } } }"
+            RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$STATUS_QUERY" '{"query": $q}')")
             
             STATUS=$(echo $RES | jq -r '.data.service.deployments.edges[0].node.status // "UNKNOWN"')
             ELAPSED=$(($(date +%s) - START_TIME))
-            
-            echo "⏱️ [+$ELAPSED秒] 容器状态: $STATUS"
+            echo "⏱️ [+$ELAPSEDs] 状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已就绪！总排队启动耗时: $ELAPSED 秒"
+              echo "✅ 服务已就绪！总排队启动时间: $ELAPSED 秒"
               exit 0
-            elif [[ "$STATUS" == "QUEUING" || "$STATUS" == "INITIALIZING" || "$STATUS" == "PREPARING" ]]; then
-              echo "🏃 正在排队/初始化中..."
             fi
           done
-          echo "⚠️ 启动时间过长，请检查网页端是否有报错。"
