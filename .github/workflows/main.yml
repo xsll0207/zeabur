@@ -1,4 +1,4 @@
-name: Zeabur 连通后开关机循环 (v3.0.0)
+name: Zeabur 连通后开关机循环 (v3.1.0)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:      # 支持手动触发
 
 jobs:
-  suspend-and-wake:
+  suspend-and-restart:
     runs-on: ubuntu-latest
     steps:
       - name: 检测网页连通性
@@ -20,14 +20,14 @@ jobs:
           echo "📡 当前 HTTP 状态码: $HTTP_STATUS"
           
           if [ "$HTTP_STATUS" -eq 200 ]; then
-            echo "✅ 网页正常开启，准备执行 [关机 -> 1分钟 -> 开机] 流程..."
+            echo "✅ 网页正常开启，准备执行 [关机 -> 1分钟 -> 重启] 流程..."
             echo "need_action=true" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ 网页当前不可访问，跳过本次流程。"
+            echo "ℹ️ 网页当前不可访问 (状态码: $HTTP_STATUS)，跳过本次流程。"
             echo "need_action=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: 执行开关机循环
+      - name: 执行开关机操作 (v2.9.0 方案)
         if: steps.check_status.outputs.need_action == 'true'
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
@@ -41,23 +41,24 @@ jobs:
             -H "Authorization: Bearer $ZEABUR_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg q "$SUSPEND_QUERY" '{"query": $q}')")
-          echo "关机响应: $SUSPEND_RES"
+          echo "API 响应: $SUSPEND_RES"
 
           # 2. 等待 1 分钟
           echo "Step 2: ⏳ 正在等待 1 分钟 (冷却中)..."
           sleep 60
 
-          # 3. 执行开机指令 (使用 v2.5.2 验证过的 restartService 方案)
-          echo "Step 3: 🚀 正在发送 restartService 指令唤醒服务..."
-          WAKE_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          WAKE_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
+          # 3. 执行重启指令 (使用 v2.9.0 的 restartService 方案)
+          echo "Step 3: 🚀 正在发送 restartService 指令..."
+          RESTART_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          RESTART_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
             -H "Authorization: Bearer $ZEABUR_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$WAKE_QUERY" '{"query": $q}')")
-          echo "开机响应: $WAKE_RES"
-
-          if [[ $WAKE_RES == *"restartService\":true"* ]]; then
-            echo "🎉 流程圆满完成：已成功关机并在1分钟后重新唤醒。"
+            -d "$(jq -n --arg q "$RESTART_QUERY" '{"query": $q}')")
+          
+          echo "API 响应: $RESTART_RES"
+          
+          if [[ $RESTART_RES == *"restartService\":true"* ]]; then
+            echo "🎉 流程成功结束：已完成关机并下达重启指令。"
           else
-            echo "⚠️ 开机指令可能未生效，请检查 API 响应。"
+            echo "❌ 重启指令下达可能失败，请检查 API 响应内容。"
           fi
