@@ -1,62 +1,74 @@
-name: Zeabur 启动排队追踪器 (v2.4.0)
+name: Zeabur 全自动启动与排队追踪 (v2.5.0)
 
 on:
-  workflow_dispatch:
-    inputs:
-      action:
-        description: '执行动作'
-        default: 'redeploy'
-        type: choice
-        options: [redeploy, restart]
+  schedule:
+    - cron: '*/20 * * * *' # 每20分钟自动检查并尝试拉起
+  workflow_dispatch: # 也支持手动一键测试
 
 jobs:
-  track-startup:
+  auto-wake-and-monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: 触发唤醒并锁定部署
+      - name: 强制唤醒服务
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          ACTION="${{ github.event.inputs.action || 'redeploy' }}"
+          echo "🚀 正在尝试全自动唤醒服务..."
           
-          # 1. 发送唤醒指令
-          echo "🚀 正在发送 ${ACTION} 指令..."
-          curl -s -X POST https://api.zeabur.com/graphql \
+          # 第一步：发送 restartService 指令（这是唤醒 Suspended 最有效的指令）
+          WAKE_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          WAKE_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
             -H "Authorization: Bearer $ZEABUR_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"query\":\"mutation { ${ACTION}Service(serviceID: \\\"$SERVICE_ID\\\", environmentID: \\\"$ENVIRONMENT_ID\\\") }\"}"
-
-          # 2. 稍等 3 秒让系统生成新部署 ID
-          sleep 3
-
-          # 3. 锁定最新的部署记录 ID
-          QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id status } } } } }"
-          RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-          DEPLOY_ID=$(echo $RES | jq -r '.data.service.deployments.edges[0].node._id')
+            -d "$(jq -n --arg q "$WAKE_QUERY" '{"query": $q}')")
           
-          echo "🎯 已锁定本次启动的部署 ID: $DEPLOY_ID"
+          echo "唤醒指令响应: $WAKE_RES"
+          
+          # 等待 5 秒，确保 Zeabur 后端生成了新的部署实例
+          sleep 5
 
-          # 4. 开始高频计时探测
+      - name: 锁定部署 ID 并计算排队耗时
+        env:
+          ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+          SERVICE_ID: ${{ secrets.SERVICE_ID }}
+        run: |
+          # 第二步：获取刚生成的 Deployment ID
+          LIST_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id status } } } } }"
+          LIST_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$LIST_QUERY" '{"query": $q}')")
+          
+          DEPLOY_ID=$(echo $LIST_RES | jq -r '.data.service.deployments.edges[0].node._id')
+          
+          if [ "$DEPLOY_ID" == "null" ]; then
+            echo "❌ 无法锁定部署 ID，可能唤醒指令未生效。"
+            exit 1
+          fi
+          
+          echo "🎯 已锁定新部署记录: $DEPLOY_ID"
           START_TIME=$(date +%s)
-          echo "⏳ 正在实时追踪状态变化..."
           
-          for i in {1..60}; do
-            # 查询该特定部署的实时状态
+          # 第三步：高频探测状态变化 (每 3 秒一次)
+          echo "⏳ 正在实时监测排队进度..."
+          for i in {1..100}; do
             CHECK_QUERY="query { node(id: \"$DEPLOY_ID\") { ... on Deployment { status } } }"
             CHECK_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$CHECK_QUERY" '{"query": $q}')")
             
-            STATUS=$(echo $CHECK_RES | jq -r '.data.node.status // "UNKNOWN"')
-            ELAPSED=$(($(date +%s) - START_TIME))
+            STATUS=$(echo $CHECK_RES | jq -r '.data.node.status')
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START_TIME))
             
-            echo "⏱️ [+$ELAPSED 秒] 部署状态: $STATUS"
+            echo "⏱️ [+$ELAPSED 秒] 状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 开机成功！总耗时: $ELAPSED 秒"
+              echo "✅ 服务已成功运行！"
+              echo "📊 本次开机排队总耗时: $ELAPSED 秒"
               exit 0
-            elif [ "$STATUS" == "QUEUING" ] || [ "$STATUS" == "INITIALIZING" ]; then
-              echo "🏃 发现排队/初始化信号..."
+            elif [ "$STATUS" == "QUEUING" ]; then
+              echo "🏃 容器正在排队中..."
+            elif [ "$STATUS" == "INITIALIZING" ]; then
+              echo "🛠️ 容器正在初始化..."
             fi
-            sleep 4 # 高频探测
+            
+            sleep 3
           done
