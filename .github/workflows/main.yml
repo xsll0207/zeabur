@@ -1,4 +1,4 @@
-name: Zeabur 自动化控制 (v1.6.5)
+name: Zeabur 自动化控制 (v1.6.6)
 
 on:
   schedule:
@@ -24,31 +24,37 @@ jobs:
         run: |
           ACTION="${{ github.event.inputs.action || 'suspend' }}"
           
-          # 1. 智能清洗：去掉可能误填的 envID= 或 service- 前缀
-          CLEAN_SID=$(echo "$RAW_SID" | sed 's/service-//g')
-          CLEAN_EID=$(echo "$RAW_EID" | sed 's/envID=//g' | sed 's/env-//g')
+          # 清理并规范化 ID
+          CLEAN_SID=$(echo "$RAW_SID" | sed 's/service-//g' | xargs)
+          CLEAN_EID=$(echo "$RAW_EID" | sed 's/envID=//g' | sed 's/env-//g' | xargs)
 
-          # 2. 统一加上官方要求的 service- 和 env- 前缀
           S_ID="service-$CLEAN_SID"
           E_ID="env-$CLEAN_EID"
 
-          echo "正在执行操作：$ACTION"
-          echo "目标服务 ID: $S_ID"
-          echo "目标环境 ID: $E_ID"
-
+          echo "---- 调试信息 ----"
+          echo "动作: $ACTION"
+          echo "标准化服务ID: $S_ID"
+          echo "标准化环境ID: $E_ID"
+          
+          # 构造 GraphQL
           QUERY="mutation { ${ACTION}Service(serviceID: \"$S_ID\", environmentID: \"$E_ID\") }"
           
+          # 发起请求
           RESPONSE=$(curl -s --request POST \
             --url https://api.zeabur.com/graphql \
             --header "Authorization: Bearer $ZEABUR_TOKEN" \
             --header "Content-Type: application/json" \
             --data "$(jq -n --arg q "$QUERY" '{"query": $q}')")
           
-          echo "API 响应内容: $RESPONSE"
+          echo "---- API 响应 ----"
+          echo "$RESPONSE"
 
           if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
-            echo "✅ 指令执行成功！"
+            echo "✅ 成功：指令已送达"
+          elif [[ $RESPONSE == *"Permission denied"* ]]; then
+            echo "❌ 权限拒绝：请按照上述步骤重新生成全权限 Token！"
+            exit 1
           else
-            echo "❌ 执行失败，请检查上方 API 响应。"
+            echo "❌ 失败：请检查响应内容"
             exit 1
           fi
