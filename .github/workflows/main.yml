@@ -1,4 +1,4 @@
-name: Zeabur 智能监测重启 (v2.1.0)
+name: Zeabur 终极监测与唤醒 (v2.2.0)
 
 on:
   schedule:
@@ -7,24 +7,24 @@ on:
     inputs:
       action:
         description: '执行动作'
-        default: 'restart'
+        default: 'redeploy'
         type: choice
-        options: [restart, suspend]
+        options: [redeploy, restart, suspend]
 
 jobs:
-  monitor-and-restart:
+  zeabur-monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: 执行重启/唤醒指令
+      - name: 强制拉起服务
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          ACTION="${{ github.event.inputs.action || 'restart' }}"
-          echo "🚀 目标服务: $SERVICE_ID"
-          
-          # 模仿 zeabur-monitor 的核心指令
+          ACTION="${{ github.event.inputs.action || 'redeploy' }}"
+          echo "🚀 尝试通过 ${ACTION} 指令唤醒服务..."
+
+          # 针对 Suspended 状态，尝试最完整的参数组合
           QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           
           RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
@@ -34,39 +34,40 @@ jobs:
           
           echo "API 指令响应: $RESPONSE"
 
-      - name: 实时排队监测
-        if: github.event.inputs.action != 'suspend'
+      - name: 捕获排队与启动耗时
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          echo "⏳ 开始监测容器排队状态..."
+          echo "⏳ 正在实时追踪容器状态机..."
           START_TIME=$(date +%s)
           
-          # 模拟 monitor 项目的轮询逻辑
-          for i in {1..40}; do
-            sleep 10
+          # 增加探测频率至 5 秒一次，以防错过“排队”状态
+          for i in {1..60}; do
+            sleep 5
             
-            # 参考查询语法：直接获取 service 下的环境状态
+            # 使用 zeabur-monitor 项目推荐的 state 查询路径
+            # 这是获取“排队”状态最灵敏的节点
             STATUS_QUERY="query { service(_id: \"$SERVICE_ID\") { state(environmentID: \"$ENVIRONMENT_ID\") { status } } }"
+            
             RES=$(curl -s -X POST https://api.zeabur.com/graphql \
               -H "Authorization: Bearer $ZEABUR_TOKEN" \
               -H "Content-Type: application/json" \
               -d "$(jq -n --arg q "$STATUS_QUERY" '{"query": $q}')")
             
-            STATUS=$(echo $RES | jq -r '.data.service.state.status // "UNKNOWN"')
+            STATUS=$(echo $RES | jq -r '.data.service.state.status // "INACTIVE"')
             ELAPSED=$(($(date +%s) - START_TIME))
             
-            echo "⏱️ [+$ELAPSEDs] 当前状态: $STATUS"
+            echo "⏱️ [+$ELAPSEDs] 实时状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已成功拉起！"
-              echo "📊 排队耗时统计: $ELAPSED 秒"
+              echo "✅ 服务启动成功！"
+              echo "📊 总排队耗时: $ELAPSED 秒"
               exit 0
-            elif [ "$STATUS" == "CRASHED" ]; then
-              echo "❌ 服务崩溃，请检查 Zeabur 日志。"
-              exit 1
+            elif [[ "$STATUS" == "QUEUING" || "$STATUS" == "INITIALIZING" || "$STATUS" == "STARTING" ]]; then
+              echo "🏃 发现容器排队/初始化信号..."
             fi
           done
-          echo "⚠️ 监测超时，服务可能仍在排队或启动较慢。"
+          
+          echo "⚠️ 警告：容器仍处于 $STATUS 状态，未能成功拉起。请检查 Zeabur 额度是否已用完。"
