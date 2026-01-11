@@ -1,4 +1,4 @@
-name: Zeabur 智能控制 (v1.9.0)
+name: Zeabur 智能控制 (v1.9.1)
 
 on:
   schedule:
@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: '执行动作'
+        description: '执行动作 (suspend/redeploy)'
         required: true
-        default: 'resume'
+        default: 'redeploy'
         type: choice
-        options: [resume, suspend]
+        options: [redeploy, suspend]
 
 jobs:
   zeabur-task:
@@ -22,43 +22,61 @@ jobs:
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          ACTION="${{ github.event.inputs.action || 'suspend' }}"
-          echo "🚀 动作: $ACTION"
+          # 修正动作：如果输入是 resume，自动转为 redeploy
+          RAW_ACTION="${{ github.event.inputs.action || 'suspend' }}"
+          if [ "$RAW_ACTION" == "resume" ] || [ "$RAW_ACTION" == "redeploy" ]; then
+            ACTION="redeploy"
+          else
+            ACTION="suspend"
+          fi
+          
+          echo "🚀 正在执行操作: ${ACTION}Service"
 
           # 1. 发送控制指令
-          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          curl -s -X POST https://api.zeabur.com/graphql \
+          # 注意：redeployService 通常只需要 serviceID 
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\") }"
+          
+          # 如果是 suspend，则需要 environmentID
+          if [ "$ACTION" == "suspend" ]; then
+             QUERY="mutation { suspendService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          fi
+
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
             -H "Authorization: Bearer $ZEABUR_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')"
+            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          
+          echo "API 指令响应: $RESPONSE"
 
-          # 2. 如果是启动动作，开始计时监控
-          if [ "$ACTION" == "resume" ]; then
-            echo "⏳ 正在监测排队与启动时间..."
+          # 2. 如果是 redeploy (启动)，监控排队时间
+          if [ "$ACTION" == "redeploy" ]; then
+            echo "⏳ 正在检测启动排队耗时..."
             START_TIME=$(date +%s)
             
-            # 循环检查状态，最多持续 5 分钟
-            for i in {1..30}; do
+            for i in {1..40}; do
               sleep 10
               
-              # 查询最新的部署记录状态
+              # 修正后的状态查询语句
               STATUS_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { status } } } } }"
               STATUS_RES=$(curl -s -X POST https://api.zeabur.com/graphql \
                 -H "Authorization: Bearer $ZEABUR_TOKEN" \
                 -H "Content-Type: application/json" \
                 -d "$(jq -n --arg q "$STATUS_QUERY" '{"query": $q}')")
               
-              CURRENT_STATUS=$(echo $STATUS_RES | jq -r '.data.service.deployments.edges[0].node.status')
-              echo "⏱️ 当前状态: $CURRENT_STATUS (已耗时 $(($(date +%s) - START_TIME)) 秒)"
+              # 提取状态
+              CURRENT_STATUS=$(echo $STATUS_RES | jq -r '.data.service.deployments.edges[0].node.status // "UNKNOWN"')
+              
+              echo "⏱️ [$(date +%T)] 当前状态: $CURRENT_STATUS (累计等待 $(($(date +%s) - START_TIME)) 秒)"
 
               if [ "$CURRENT_STATUS" == "RUNNING" ]; then
-                END_TIME=$(date +%s)
-                DURATION=$((END_TIME - START_TIME))
-                echo "✅ 服务已就绪！"
-                echo "📊 本次启动（含排队）总耗时: $DURATION 秒"
+                echo "✅ 服务已正式运行！"
+                echo "📊 启动总耗时（含排队）: $(($(date +%s) - START_TIME)) 秒"
                 exit 0
               fi
+              
+              if [ "$CURRENT_STATUS" == "CRASHED" ]; then
+                echo "❌ 服务启动崩溃，请检查日志。"
+                exit 1
+              fi
             done
-            
-            echo "⚠️ 启动超时（超过5分钟），请检查 Zeabur 控制台。"
           fi
