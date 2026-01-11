@@ -1,45 +1,62 @@
-name: Zeabur 手动启动耗时分析 (v2.3.0)
+name: Zeabur 启动排队追踪器 (v2.4.0)
 
 on:
-  workflow_dispatch: # 建议你点完网页按钮后，立刻手动运行这个 Action
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '执行动作'
+        default: 'redeploy'
+        type: choice
+        options: [redeploy, restart]
 
 jobs:
-  track-deployment:
+  track-startup:
     runs-on: ubuntu-latest
     steps:
-      - name: 追踪最新部署进度
+      - name: 触发唤醒并锁定部署
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          echo "🔍 正在检索最新部署记录..."
+          ACTION="${{ github.event.inputs.action || 'redeploy' }}"
           
-          # 获取最新一条部署的 ID 和初始状态
-          QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id status createdAt } } } } }"
-          INIT_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          # 1. 发送唤醒指令
+          echo "🚀 正在发送 ${ACTION} 指令..."
+          curl -s -X POST https://api.zeabur.com/graphql \
+            -H "Authorization: Bearer $ZEABUR_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { ${ACTION}Service(serviceID: \\\"$SERVICE_ID\\\", environmentID: \\\"$ENVIRONMENT_ID\\\") }\"}"
+
+          # 2. 稍等 3 秒让系统生成新部署 ID
+          sleep 3
+
+          # 3. 锁定最新的部署记录 ID
+          QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id status } } } } }"
+          RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          DEPLOY_ID=$(echo $RES | jq -r '.data.service.deployments.edges[0].node._id')
           
-          DEPLOY_ID=$(echo $INIT_RES | jq -r '.data.service.deployments.edges[0].node._id')
-          CREATED_AT=$(echo $INIT_RES | jq -r '.data.service.deployments.edges[0].node.createdAt')
+          echo "🎯 已锁定本次启动的部署 ID: $DEPLOY_ID"
+
+          # 4. 开始高频计时探测
+          START_TIME=$(date +%s)
+          echo "⏳ 正在实时追踪状态变化..."
           
-          echo "📡 当前最新部署 ID: $DEPLOY_ID (创建于: $CREATED_AT)"
-          
-          START_TS=$(date +%s)
-          
-          for i in {1..100}; do
-            # 查询该特定部署 ID 的实时状态
+          for i in {1..60}; do
+            # 查询该特定部署的实时状态
             CHECK_QUERY="query { node(id: \"$DEPLOY_ID\") { ... on Deployment { status } } }"
             CHECK_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$CHECK_QUERY" '{"query": $q}')")
             
-            STATUS=$(echo $CHECK_RES | jq -r '.data.node.status')
-            NOW_TS=$(date +%s)
-            DIFF=$((NOW_TS - START_TS))
+            STATUS=$(echo $CHECK_RES | jq -r '.data.node.status // "UNKNOWN"')
+            ELAPSED=$(($(date +%s) - START_TIME))
             
-            echo "⏱️ [+$DIFF s] 部署状态: $STATUS"
+            echo "⏱️ [+$ELAPSED 秒] 部署状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 启动成功！"
-              # 这里的耗时是脚本监测到的耗时，建议对比网页上的部署时间戳
+              echo "✅ 开机成功！总耗时: $ELAPSED 秒"
               exit 0
+            elif [ "$STATUS" == "QUEUING" ] || [ "$STATUS" == "INITIALIZING" ]; then
+              echo "🏃 发现排队/初始化信号..."
             fi
-            sleep 3
+            sleep 4 # 高频探测
           done
