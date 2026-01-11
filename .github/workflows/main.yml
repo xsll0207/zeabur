@@ -1,17 +1,47 @@
-name: Zeabur 终极 ID 探测器 (v1.7.1)
-on: workflow_dispatch
+name: Zeabur 自动化控制 (v1.8.0)
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '执行动作 (suspend-停止 / resume-启动)'
+        required: true
+        default: 'suspend'
+        type: choice
+        options:
+          - suspend
+          - resume
+
 jobs:
-  check-ids:
+  zeabur-task:
     runs-on: ubuntu-latest
     steps:
-      - name: 强制列出所有 ID
+      - name: 执行控制指令
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+          SERVICE_ID: ${{ secrets.SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          # 使用最原始的 Relay 结构查询
-          QUERY='query { projects { edges { node { name _id environments { _id name } services { _id name } } } } }'
+          ACTION="${{ github.event.inputs.action || 'suspend' }}"
           
-          curl -s --request POST --url https://api.zeabur.com/graphql \
+          echo "正在对服务 $SERVICE_ID 执行 $ACTION 操作..."
+          
+          # 核心修正：使用最原始的 ID，不加任何 service- 或 env- 前缀
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
+          
+          RESPONSE=$(curl -s --request POST \
+            --url https://api.zeabur.com/graphql \
             --header "Authorization: Bearer $ZEABUR_TOKEN" \
             --header "Content-Type: application/json" \
-            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')" | jq .
+            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          
+          echo "API 响应内容: $RESPONSE"
+
+          if [[ $RESPONSE == *"\"${ACTION}Service\":true"* ]]; then
+            echo "✅ 指令执行成功！"
+          else
+            echo "❌ 执行失败，请检查响应内容"
+            exit 1
+          fi
