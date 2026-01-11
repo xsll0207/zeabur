@@ -1,64 +1,72 @@
-name: Zeabur 深度唤醒与排队监测 (v2.0.0)
+name: Zeabur 智能监测重启 (v2.1.0)
 
 on:
+  schedule:
+    - cron: '*/20 * * * *'
   workflow_dispatch:
     inputs:
       action:
         description: '执行动作'
-        required: true
-        default: 'redeploy'
+        default: 'restart'
         type: choice
-        options: [redeploy, suspend]
+        options: [restart, suspend]
 
 jobs:
-  zeabur-task:
+  monitor-and-restart:
     runs-on: ubuntu-latest
     steps:
-      - name: 获取最新部署 ID 并执行重启
+      - name: 执行重启/唤醒指令
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
           ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          # 1. 获取最后一次部署的 ID
-          LIST_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id } } } } }"
-          LIST_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$LIST_QUERY" '{"query": $q}')")
+          ACTION="${{ github.event.inputs.action || 'restart' }}"
+          echo "🚀 目标服务: $SERVICE_ID"
           
-          DEPLOY_ID=$(echo $LIST_RES | jq -r '.data.service.deployments.edges[0].node._id')
+          # 模仿 zeabur-monitor 的核心指令
+          QUERY="mutation { ${ACTION}Service(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           
-          if [ "$DEPLOY_ID" == "null" ] || [ -z "$DEPLOY_ID" ]; then
-            echo "❌ 未找到部署记录，尝试普通重启..."
-            QUERY="mutation { redeployService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
-          else
-            echo "🎯 找到目标部署 ID: $DEPLOY_ID"
-            # 2. 模仿网页端：针对特定部署 ID 进行重部署
-            QUERY="mutation { redeployService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\", deploymentID: \"$DEPLOY_ID\") }"
-          fi
+          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql \
+            -H "Authorization: Bearer $ZEABUR_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+          
+          echo "API 指令响应: $RESPONSE"
 
-          echo "🚀 发送指令..."
-          RESPONSE=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-          echo "API 响应: $RESPONSE"
-
-      - name: 监测排队耗时
-        if: github.event.inputs.action == 'redeploy'
+      - name: 实时排队监测
+        if: github.event.inputs.action != 'suspend'
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
           SERVICE_ID: ${{ secrets.SERVICE_ID }}
+          ENVIRONMENT_ID: ${{ secrets.ENVIRONMENT_ID }}
         run: |
-          echo "⏳ 监测容器拉起状态..."
+          echo "⏳ 开始监测容器排队状态..."
           START_TIME=$(date +%s)
-          for i in {1..60}; do
+          
+          # 模拟 monitor 项目的轮询逻辑
+          for i in {1..40}; do
             sleep 10
-            # 这里查询的是 service 的实时运行状态
-            STATUS_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { status } } } } }"
-            RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$STATUS_QUERY" '{"query": $q}')")
             
-            STATUS=$(echo $RES | jq -r '.data.service.deployments.edges[0].node.status // "UNKNOWN"')
+            # 参考查询语法：直接获取 service 下的环境状态
+            STATUS_QUERY="query { service(_id: \"$SERVICE_ID\") { state(environmentID: \"$ENVIRONMENT_ID\") { status } } }"
+            RES=$(curl -s -X POST https://api.zeabur.com/graphql \
+              -H "Authorization: Bearer $ZEABUR_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg q "$STATUS_QUERY" '{"query": $q}')")
+            
+            STATUS=$(echo $RES | jq -r '.data.service.state.status // "UNKNOWN"')
             ELAPSED=$(($(date +%s) - START_TIME))
-            echo "⏱️ [+$ELAPSEDs] 状态: $STATUS"
+            
+            echo "⏱️ [+$ELAPSEDs] 当前状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已就绪！总排队启动时间: $ELAPSED 秒"
+              echo "✅ 服务已成功拉起！"
+              echo "📊 排队耗时统计: $ELAPSED 秒"
               exit 0
+            elif [ "$STATUS" == "CRASHED" ]; then
+              echo "❌ 服务崩溃，请检查 Zeabur 日志。"
+              exit 1
             fi
           done
+          echo "⚠️ 监测超时，服务可能仍在排队或启动较慢。"
