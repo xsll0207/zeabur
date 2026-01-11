@@ -1,23 +1,17 @@
-name: Zeabur 权限归属探测器 (v1.7.0)
+name: Zeabur 终极 ID 探测器 (v1.7.1)
 on: workflow_dispatch
 jobs:
-  check-permission:
+  check-ids:
     runs-on: ubuntu-latest
     steps:
-      - name: 探测 Token 可见性
+      - name: 强制列出所有 ID
         env:
           ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
         run: |
-          # 1. 查 Token 自己的身份
-          echo "--- 身份检查 ---"
+          # 使用最原始的 Relay 结构查询
+          QUERY='query { projects { edges { node { name _id environments { _id name } services { _id name } } } } }'
+          
           curl -s --request POST --url https://api.zeabur.com/graphql \
             --header "Authorization: Bearer $ZEABUR_TOKEN" \
             --header "Content-Type: application/json" \
-            --data '{"query":"query { me { username email } }"}' | jq .
-
-          # 2. 查该 Token 真正有权操作的所有项目和环境 ID
-          echo "--- 权限范围检查 ---"
-          curl -s --request POST --url https://api.zeabur.com/graphql \
-            --header "Authorization: Bearer $ZEABUR_TOKEN" \
-            --header "Content-Type: application/json" \
-            --data '{"query":"query { projects { items { name _id environments { _id name } services { _id name } } } }"}' | jq .
+            --data "$(jq -n --arg q "$QUERY" '{"query": $q}')" | jq .
