@@ -1,4 +1,4 @@
-name: Zeabur 全自动监控 (v2.5.1)
+name: Zeabur 自动唤醒与排队监测 (v2.5.2)
 
 on:
   schedule:
@@ -20,36 +20,30 @@ jobs:
           WAKE_QUERY="mutation { restartService(serviceID: \"$SERVICE_ID\", environmentID: \"$ENVIRONMENT_ID\") }"
           curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$WAKE_QUERY" '{"query": $q}')"
           
-          echo "⏳ 等待系统响应..."
-          sleep 8
-
-          # 2. 尝试锁定 Deployment ID，如果锁不到就直接查 Service 状态
-          LIST_QUERY="query { service(_id: \"$SERVICE_ID\") { deployments(limit: 1) { edges { node { _id } } } } }"
-          LIST_RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$LIST_QUERY" '{"query": $q}')")
-          DEPLOY_ID=$(echo $LIST_RES | jq -r '.data.service.deployments.edges[0].node._id // ""')
+          echo "⏳ 等待系统破冰..."
+          sleep 10
 
           START_TIME=$(date +%s)
-          echo "监控开始..."
+          echo "🔍 正在高频探测容器状态机..."
 
-          for i in {1..50}; do
-            # 如果有部署 ID 则查部署，否则查服务状态机
-            if [ -n "$DEPLOY_ID" ] && [ "$DEPLOY_ID" != "null" ]; then
-              QUERY="query { node(id: \"$DEPLOY_ID\") { ... on Deployment { status } } }"
-              RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-              STATUS=$(echo $RES | jq -r '.data.node.status')
-            else
-              QUERY="query { service(_id: \"$SERVICE_ID\") { state(environmentID: \"$ENVIRONMENT_ID\") { status } } }"
-              RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
-              STATUS=$(echo $RES | jq -r '.data.service.state.status')
-            fi
-
+          for i in {1..60}; do
+            # 修正后的查询：直接查 service 节点下的状态，避免 state 节点返回 null
+            QUERY="query { service(_id: \"$SERVICE_ID\") { status(environmentID: \"$ENVIRONMENT_ID\") } }"
+            RES=$(curl -s -X POST https://api.zeabur.com/graphql -H "Authorization: Bearer $ZEABUR_TOKEN" -H "Content-Type: application/json" -d "$(jq -n --arg q "$QUERY" '{"query": $q}')")
+            
+            # 提取状态，并设置默认值防止 null
+            STATUS=$(echo $RES | jq -r '.data.service.status // "STARTING"')
+            
             ELAPSED=$(($(date +%s) - START_TIME))
-            echo "⏱️ [+$ELAPSED s] 状态: $STATUS"
+            echo "⏱️ [+$ELAPSED s] 容器状态: $STATUS"
 
             if [ "$STATUS" == "RUNNING" ]; then
-              echo "✅ 服务已就绪！"
-              echo "📊 识别到开机总耗时: $ELAPSED 秒"
+              echo "✅ 服务已正式运行！"
+              echo "📊 开机排队总耗时: $ELAPSED 秒"
               exit 0
+            elif [ "$STATUS" == "CRASHED" ]; then
+              echo "❌ 服务启动崩溃，请检查 Zeabur 控制台日志。"
+              exit 1
             fi
             sleep 5
           done
